@@ -1,0 +1,1021 @@
+---
+title: "Final_Prj_code"
+output: pdf_document
+---
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r Read train.csv and perform data extraction to retrieve useful information and convert necesssary variables into factors}
+
+library("caret")
+library("C50")
+library("RWeka")
+library("e1071")
+library("psych")
+library("rmarkdown")
+library("rminer")
+library("rpart")
+library("rpart.plot")
+library("kernlab")
+getwd()
+setwd("/Users/rammatta/Documents/6482_DataMining/project/bikeShare")
+TrainFile = "train.csv"
+## Read the data file  
+datBike <- read.csv(TrainFile,stringsAsFactors = FALSE)
+
+##check the structure of the imported file
+str(datBike)
+summary(datBike)
+
+### Data Preparation 
+
+## Convert the datetime character field into Datatime format and store into a new variable
+datBike$datetime_c <- strptime(datBike$datetime, format='%Y-%m-%d %H:%M:%S')
+
+## Extract the hour from the date filed
+datBike$hrs <- strftime(datBike$datetime_c, '%H')
+
+#convert hrs column from char to integer and then convert it into factor with 24 levels
+datBike$hrs <- as.numeric(datBike$hrs)
+datBike$hrs <- factor(datBike$hrs)
+
+#Similarly extract month, year, day from the train data and convert into integers
+datBike$month<-as.integer(format(datBike$datetime_c, format = "%m"))
+datBike$year<-as.integer(format(datBike$datetime_c, format = "%Y"))
+datBike$day<-as.integer(format(datBike$datetime_c, format = "%d"))
+
+# Convert month, year and day also to factors
+datBike$day <- factor(datBike$day)
+datBike$year <- factor(datBike$year)
+datBike$month <- factor(datBike$month)
+
+
+# Convert Season, holiday,workingday and weather colummns into factors
+datBike$season <- factor(datBike$season)
+datBike$holiday <- factor(datBike$holiday)
+datBike$workingday <- factor(datBike$workingday)
+datBike$weather <- factor(datBike$weather)
+
+##check the structure of the imported file
+str(datBike)
+summary(datBike)
+
+
+
+#Dummy Weather Factors to Numeric variables (used in Linear Model only)
+## This is used because there is only one instance with weather=4. Without dummy coding the variables Linear Model cannot predict the test instance when the value is not present in train data while training the model 
+datBike$weatherCat1 <- ifelse(datBike$weather==1, 1, 0)
+datBike$weatherCat2 <- ifelse(datBike$weather==2, 1, 0)
+datBike$weatherCat3 <- ifelse(datBike$weather==3, 1, 0)
+datBike$weatherCat4 <- ifelse(datBike$weather==4, 1, 0)
+
+
+
+```
+
+## Data distribution and plots from training data
+```{r  Data Distribution Plots}
+# Explaining the correlation between numberic variables
+pairs.panels(datBike[,6:12])
+
+## Function to identify the season Name from the factor values
+seasonName <- function(x) {
+   if (x==1 ) { return ("Spring") }
+   else if(x==2 ) {return ("Summer")}
+   else if(x==3 ){ return ("Fall")}
+   else if(x ==4 ) {return ("Winter")}
+} 
+
+
+countVsSeasonWeather <- aggregate(count ~ season+weather, datBike, FUN=mean)
+countVsSeasonWeather
+countVsSeasonWeather$season_name <- sapply(countVsSeasonWeather$season, seasonName)
+
+plot(countVsSeasonWeather$weather, countVsSeasonWeather$count,xlab = "Weather Category",
+  ylab = "Total Rentals", main = "Rentals by season and weather", type = "n",xaxt = "n")
+axis(1, at=1:4 )
+
+lines(countVsSeasonWeather$weather[countVsSeasonWeather$season_name == "Summer"],
+  countVsSeasonWeather$count[countVsSeasonWeather$season_name == "Summer"], col = "black", pch = 16,type="b")
+lines(countVsSeasonWeather$weather[countVsSeasonWeather$season_name == "Spring"],
+  countVsSeasonWeather$count[countVsSeasonWeather$season_name == "Spring"], col = "green", pch = 16,type="b")
+lines(countVsSeasonWeather$weather[countVsSeasonWeather$season_name == "Fall"],
+  countVsSeasonWeather$count[countVsSeasonWeather$season_name == "Fall"], col = "red", pch = 16,type="b")
+lines(countVsSeasonWeather$weather[countVsSeasonWeather$season_name == "Winter"],
+  countVsSeasonWeather$count[countVsSeasonWeather$season_name == "Winter"], col = "blue", pch = 16,type="b")
+legend(3.5, 245, legend = c("Summer", "Spring", "Fall", "Winter"),
+  col = c("black", "green", "red", "blue"), pch = 16,x.intersp=1, y.intersp = 1)
+
+
+
+## Mean Temperature in Train data across seasons
+seasonVStemp <- aggregate(temp ~ season, datBike, FUN=mean)
+seasonVStemp$season_name <-  c("spring", "summer", "fall", "winter")
+seasonVStemp
+
+#barplot showing the Temperature distribution across Seasons
+barplot(seasonVStemp$temp,
+  main="Mean Temperatures across Seasons",
+  xlab="Degree Celsius",
+  ylab="Season",
+  names.arg=seasonVStemp$season_name,
+  col="grey",
+  width =1,
+  horiz=TRUE)
+
+```
+
+## Initial and Intermediate Data Mining Tasks -- Regression
+```{r Evaluation Approach -- Cross Validation -- Base Model of Linear Regression with 5 fold CrossValidation }
+
+# Set seed and create 5 folds
+set.seed(400)
+k=5
+folds <- createFolds(datBike$count,k)
+
+# Check the folds created
+str(folds)
+
+metricresult <- list()
+metricArray <- array()
+
+## Build and Evaluate the Linear model using the basic predictors over 5 folds. 
+
+for (i in 1:k) {
+  
+  datTrain <- datBike[(-folds[[i]]),]
+  datTest <- datBike[(folds[[i]]),]
+  
+   lmModel <- lm(count ~ holiday+workingday +humidity+windspeed+temp+atemp+humidity+hrs+season+weatherCat4+weatherCat3+weatherCat2+weatherCat1,data=datTrain)
+  
+ lmPredict <- predict(lmModel, datTest)
+ 
+ metricresult[[i]] <- mmetric(datTest$count, lmPredict,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+
+ metricArray <- cbind(metricArray,metricresult[[i]])   
+}
+
+# Print the performance metrics over 5 folds.
+metricArray
+# Take the mean of performance metrics over 5 folds for Linear Model.
+rowMeans(metricArray[1:8,-1])
+
+
+## Predicting Casual count for Linear model
+metricresult <- list()
+metricArray <- array()
+
+for (i in 1:k) {
+  
+  datTrain <- datBike[(-folds[[i]]),]
+  datTest <- datBike[(folds[[i]]),]
+ 
+   lmModel <- lm(casual ~ holiday+workingday +humidity+windspeed+temp+atemp+humidity+hrs+season+weatherCat4+weatherCat3+weatherCat2+weatherCat1,data=datTrain)
+  
+ lmPredict <- predict(lmModel, datTest)
+ 
+ metricresult[[i]] <- mmetric(datTest$casual, lmPredict,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+
+ metricArray <- cbind(metricArray,metricresult[[i]])   
+}
+
+metricArray
+rowMeans(metricArray[1:8,-1])
+
+
+## Predicting Registered users count for Linear model
+metricresult <- list()
+metricArray <- array()
+
+for (i in 1:k) {
+  
+  datTrain <- datBike[(-folds[[i]]),]
+  datTest <- datBike[(folds[[i]]),]
+ 
+  lmModel_registered <- lm(registered ~ holiday+workingday +humidity+windspeed+temp+atemp+humidity+hrs+season+weatherCat4+weatherCat3+weatherCat2+weatherCat1,data=datTrain)
+  
+ lmPredict <- predict(lmModel_registered, datTest)
+ 
+ metricresult[[i]] <- mmetric(datTest$registered, lmPredict,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+
+ metricArray <- cbind(metricArray,metricresult[[i]])   
+}
+
+metricArray
+rowMeans(metricArray[1:8,-1])
+
+```
+
+```{r Model Building using Regression Trees - Using Random sampling}
+
+#randomizing data
+set.seed(1234)
+rand.index<-order(runif(nrow(datBike)))
+datBike_r<-datBike[rand.index,]
+atest<-datBike_r
+
+# Taking 70% of the data as 
+t<-floor(0.7*nrow(atest))
+str(datBike)
+train_randomSampling<-atest[1:t,]  #-c(1,13)
+str(train_randomSampling)
+test_randomSampling<-atest[-(1:t),]
+
+library(rpart)
+model_rpart_casual<-rpart(casual~season+holiday+workingday+weather+temp+atemp+
+                            humidity+windspeed+hrs,data=train_randomSampling)
+model_rpart_registered<-rpart(registered~season+holiday+workingday+weather+temp+
+                                atemp+humidity+windspeed+hrs,data=train_randomSampling)
+model_rpart_count<-rpart(count~season+holiday+workingday+weather+temp+
+                                atemp+humidity+windspeed+hrs,data=train_randomSampling)
+
+
+rpart.plot(model_rpart_casual,digits=1)
+rpart.plot(model_rpart_registered,digits=1)
+rpart.plot(model_rpart_count,digits=1)
+
+rpart.plot(model_rpart_casual,digits=1,fallen.leaves=TRUE,type=3,extra=101)
+rpart.plot(model_rpart_registered,digits=1,fallen.leaves=TRUE,type=3,extra=101)
+rpart.plot(model_rpart_count,digits=1,fallen.leaves=TRUE,type=3,extra=101)
+
+# Predicting the performance of the Regression Tree model for casual users and evaluate performance against Random sampled testing set  using mmetric function
+predicted_rpart_casual<-predict(model_rpart_casual,test_randomSampling)
+mmetric(test_randomSampling$casual, predicted_rpart_casual,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+
+
+# Predicting the performance of the Regression Tree model for registered users and evaluate performance against Random sampled testing set  using mmetric function
+predicted_rpart_registered<-predict(model_rpart_registered,test_randomSampling)
+mmetric(test_randomSampling$registered, predicted_rpart_registered,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+
+# Predicting the performance of the Regression Tree model for total count and evaluate performance against Random sampled testing set using mmetric function 
+predicted_rpart_count<-predict(model_rpart_count,test_randomSampling)
+mmetric(test_randomSampling$count, predicted_rpart_count,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+
+```
+
+
+```{r Model Tree building and Evaluation using Random Sampling}
+
+library(RWeka)
+modelM5_casual<-M5P(casual~season+holiday+workingday+weather+temp+atemp+
+                            humidity+windspeed+hrs,data=train_randomSampling)
+modelM5_registered<-M5P(registered~season+holiday+workingday+weather+temp+
+                                atemp+humidity+windspeed+hrs,data=train_randomSampling)
+modelM5_count<-M5P(count~season+holiday+workingday+weather+temp+
+                                atemp+humidity+windspeed+hrs,data=train_randomSampling)
+
+# Predicting the performance of the Regression Tree model for casual users and evaluate performance against Random sampled testing set  using mmetric function
+predicted_M5_casual<-predict(modelM5_casual,test_randomSampling)
+mmetric(test_randomSampling$casual, predicted_M5_casual,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+
+# Predicting the performance of the Regression Tree model for registered users and evaluate performance against Random sampled testing set  using mmetric function
+predicted_M5_registered<-predict(modelM5_registered,test_randomSampling)
+mmetric(test_randomSampling$registered, predicted_M5_registered,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+
+# Predicting the performance of the Regression Tree model for total count and evaluate performance against Random sampled testing set using mmetric function 
+predicted_M5_count<-predict(modelM5_count,test_randomSampling)
+mmetric(test_randomSampling$count, predicted_M5_count,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+```
+
+
+```{r Model Tree with actual predictors}
+
+set.seed(400)
+k=5
+folds <- createFolds(datBike$count,k)
+#str(folds)
+
+M5_metricresult <- list()
+M5_metricArray <- array()
+
+for (i in 1:k) {
+  
+  datTrain <- datBike[(-folds[[i]]),]
+  datTest <- datBike[(folds[[i]]),]
+ 
+  M5Model <- M5P(count ~ holiday+workingday +humidity+windspeed+atemp+hrs+season+weather+temp,data=datTrain)
+  
+  M5Model <- M5P(count ~ holiday+workingday +humidity+windspeed+atemp+hrs+season+weather+temp,data=datTrain)
+  
+ m5Predict <- predict(M5Model, datTest)
+ 
+ M5_metricresult[[i]] <- mmetric(datTest$count, m5Predict,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+
+ M5_metricArray <- cbind(M5_metricArray,M5_metricresult[[i]])   
+}
+
+M5_metricArray
+rowMeans(M5_metricArray[1:8,-1])
+
+```
+
+## Model Improvement Methods
+```{r Custom built function to create lag/lead values for predictors}
+
+## Create a shift function, can be used for lead or lag any predictor(x) by (shift_by) number of values
+
+# Positive value for shift_by means values is Lead
+# Negative value for shift_by means values are lagged
+
+shiftK<-function(x,shift_by){
+    stopifnot(is.numeric(shift_by))
+    stopifnot(is.numeric(x))
+ 
+    if (length(shift_by)>1)
+        return(sapply(shift_by,shift, x=x))
+ 
+    out<-NULL
+    abs_shift_by=abs(shift_by)
+    if (shift_by > 0 )
+        out<-c(tail(x,-abs_shift_by),rep(NA,abs_shift_by))
+    else if (shift_by < 0 )
+        out<-c(rep(NA,abs_shift_by), head(x,-abs_shift_by))
+    else
+        out<-x
+    out
+}
+
+```
+
+```{r Model Improvement ,Creating new predictors}
+
+# Create a new predictor with atemp of previous hour 
+datBike$aTempPrevX <- shiftK(datBike$atemp, -1)
+# Impute the missing values with atemp of present hour
+datBike$aTempPrevX <- ifelse(is.na(datBike["aTempPrevX"]), datBike$atemp, datBike$aTempPrevX)
+
+# Create a new predictor with temp of previous hour 
+datBike$TempPrevX <- shiftK(datBike$temp, -1)
+# Impute the missing values with temp of present hour
+datBike$TempPrevX <- ifelse(is.na(datBike["TempPrevX"]), datBike$temp, datBike$TempPrevX)
+
+# Create a new predictor with windspeed of previous hour 
+datBike$windspeedPrevX <- shiftK(datBike$windspeed, -1)
+# Impute the missing values with windspeed of present hour
+datBike$windspeedPrevX <- ifelse(is.na(datBike["windspeedPrevX"]), datBike$windspeed, datBike$windspeedPrevX)
+
+
+```
+
+## Finalized Model -- Model Tree with 5 fold Cross validation 
+```{r Model tree with new predictors + actual predictors}
+
+set.seed(400)
+k=5
+folds <- createFolds(datBike$count,k)
+#str(folds)
+
+M5_metricresult <- list()
+M5_metricArray <- array()
+
+for (i in 1:k) {
+  
+  datTrain <- datBike[(-folds[[i]]),]
+  datTest <- datBike[(folds[[i]]),]
+  
+  M5Model <- M5P(count ~ holiday+workingday +humidity+windspeed+atemp+hrs+season+weather+temp+TempPrevX+aTempPrevX+windspeedPrevX,data=datTrain)
+  
+ m5Predict <- predict(M5Model, datTest)
+ 
+ M5_metricresult[[i]] <- mmetric(datTest$count, m5Predict,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+
+ M5_metricArray <- cbind(M5_metricArray,M5_metricresult[[i]])   
+}
+
+M5_metricArray
+# Mean performance results over 5 fold cross validation.
+rowMeans(M5_metricArray[1:8,-1])
+
+
+
+
+## Build model and evaluate the performance of model for casual users.
+M5_metricresult <- list()
+M5_metricArray <- array()
+
+for (i in 1:k) {
+  
+  datTrain <- datBike[(-folds[[i]]),]
+  datTest <- datBike[(folds[[i]]),]
+  
+  M5Model <- M5P(casual ~ holiday+workingday +humidity+windspeed+atemp+hrs+season+weather+temp+TempPrevX+aTempPrevX+windspeedPrevX,data=datTrain)
+  
+ m5Predict <- predict(M5Model, datTest)
+ 
+ M5_metricresult[[i]] <- mmetric(datTest$casual, m5Predict,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+
+ M5_metricArray <- cbind(M5_metricArray,M5_metricresult[[i]])   
+}
+
+M5_metricArray
+# Mean performance results over 5 fold cross validation.
+rowMeans(M5_metricArray[1:8,-1])
+
+
+### Evaluting the model for registered user prediction
+set.seed(400)
+k=5
+folds <- createFolds(datBike$registered,k)
+#str(folds)
+
+M5_metricresult <- list()
+M5_metricArray <- array()
+
+for (i in 1:k) {
+  
+  datTrain <- datBike[(-folds[[i]]),]
+  datTest <- datBike[(folds[[i]]),]
+  
+  M5Model <- M5P(registered ~ holiday+workingday +humidity+windspeed+atemp+hrs+season+weather+temp+TempPrevX+aTempPrevX+windspeedPrevX,data=datTrain)
+  
+ m5Predict <- predict(M5Model, datTest)
+ 
+ M5_metricresult[[i]] <- mmetric(datTest$registered, m5Predict,c("MAE","RMSE","MAPE","RMSPE","RAE","RRSE","COR","R2") )
+
+ M5_metricArray <- cbind(M5_metricArray,M5_metricresult[[i]])   
+}
+
+M5_metricArray
+# Mean performance results over 5 fold cross validation.
+rowMeans(M5_metricArray[1:8,-1])
+```
+
+
+## Sliding Window 
+## 7 days training data to predict next 7 days of test data until all the days of the month are predicted.
+## Slide the window by 1 day and continue the process of training and testing with a dataset of 7 days each
+```{r  Sliding window approach to predict the actual test set}
+
+## A data window of 7 days is used as training data to build model and predict the final target variables of the test set which is the next 7 days starting from the end of training data set.
+# The train data window is then moved by 1 day and then used to predict the next 7 days. This process is repeated until all the days of the month are predicted from the actual test set. (i.e last 10 days of the month)
+
+# Clear the previous values of train data
+datBike <- NULL
+# Reload the training data (first 20 days of the month)
+datBike <- read.csv("train.csv",stringsAsFactors = FALSE)
+str(datBike)
+
+## Read the test data file (last 10 days of the month)
+datTest <- read.csv("test.csv",stringsAsFactors = FALSE)
+str(datTest)
+
+# Create target variables for testing set with NA values
+datTest$casual <- c(NA)
+datTest$registered <- c(NA)
+datTest$count <- c(NA)
+
+#Append the test set(last 10 days of month) to train set(first 20 days)
+datFinal <- rbind(datBike, datTest)
+
+#Check the structure of the file
+str(datFinal)
+#Check the summary of the file
+summary(datFinal)
+
+```
+
+```{r Data Preparation for the entire dataset -- total train+testset, all 30 days of the month}
+
+# Convert the datetime field from chr to datetime
+datFinal$datetime_c <- strptime(datFinal$datetime, format='%Y-%m-%d %H:%M:%S')
+
+# order the final data in descending order of datetime column and store it into a new dataframe 
+datFinal1 <- datFinal[order(as.Date(datFinal$datetime_c,format='%Y-%m-%d %H:%M:%S')),,drop=FALSE]
+
+
+# Extract the hour from the datetime field
+datFinal1$hrs <- strftime(datFinal1$datetime_c, '%H')
+# check the structure of the datafile
+str(datFinal1)
+summary(datFinal1)
+
+## This process is same as done previously but 
+#convert into hrs to numeric
+datFinal1$hrs <- as.numeric(datFinal1$hrs)
+#convert into hrs to factor
+datFinal1$hrs <- factor(datFinal1$hrs)
+
+datFinal1$season <- factor(datFinal1$season)
+datFinal1$holiday <- factor(datFinal1$holiday)
+datFinal1$workingday <- factor(datFinal1$workingday)
+datFinal1$weather <- factor(datFinal1$weather)
+
+## New variables with previous hours values
+## Same as in Chunk7 ,but for entire dataset
+datFinal1$aTempPrevX <- shiftK(datFinal1$atemp, -1)
+datFinal1$aTempPrevX <- ifelse(is.na(datFinal1["aTempPrevX"]), datFinal1$atemp, datFinal1$aTempPrevX)
+datFinal1$aTempPrevX <- datFinal1$aTempPrevX[,1]
+
+datFinal1$TempPrevX <- shiftK(datFinal1$temp, -1)
+datFinal1$TempPrevX <- ifelse(is.na(datFinal1["TempPrevX"]), datFinal1$temp, datFinal1$TempPrevX)
+datFinal1$TempPrevX <- datFinal1$TempPrevX[,1]
+
+
+datFinal1$windspeedPrevX <- shiftK(datFinal1$windspeed, -1)
+datFinal1$windspeedPrevX <- ifelse(is.na(datFinal1["windspeedPrevX"]), datFinal1$windspeed, datFinal1$windspeedPrevX)
+datFinal1$windspeedPrevX <- datFinal1$windspeedPrevX[,1]
+
+```
+
+
+```{r Sliding window approach, build model and predict the values}
+# Set windowsize of 7 days
+timeFrame <- 7
+# Stopping condition for model building
+finalRec <- FALSE
+
+## Initial training data start date= same as 1st record of the month (1st record in this dataset)
+trainStartDate <- as.Date(datFinal1[1,c("datetime_c")])
+trainStartDate
+
+# Extract the month and year from the training data start date.
+mnth <- strftime(trainStartDate, '%m')
+mnth
+yr  <- strftime(trainStartDate, '%Y')
+yr
+
+
+# Extract the day, month, year till which the prediction is needed= Final day from the dataset
+if(TRUE) { maxYr <- strftime(tail(datFinal1[,c("datetime_c")],1),'%Y')
+maxMnt <- strftime(tail(datFinal1[,c("datetime_c")],1),'%m')
+LastDay <- (max(strftime(datFinal1$datetime_c,'%Y-%m-%d')))
+}
+
+# Count the total no.of iteration/ no. of models total built
+i <- 1
+newTestEndMonth <- mnth
+newTestEndYr <- yr
+
+## While the stopping condition (final record is not reached) is not met continue
+while (mnth == newTestEndMonth && finalRec == FALSE)  {
+
+## Set the start date for traindata  
+newTrainStartDate <-  as.Date(trainStartDate)
+## Obtain the record from which traindata starts 
+newTrainStartRec <- head( which(as.Date(datFinal1$datetime_c) == newTrainStartDate) ,1)
+## Set the end date for traindata
+newTrainEndDate <- as.Date(newTrainStartDate)+  timeFrame #7
+## Obtain the record at which traindata ends 
+newTrainEndRec <- head(which(as.Date(datFinal1$datetime_c) == newTrainEndDate) ,1) -1 
+
+## Create the train data with 7 days data 
+datTrainNew <- datFinal1[newTrainStartRec :newTrainEndRec,]
+
+## Starting date of test data
+newTestStartDate <- as.Date(newTrainEndDate)
+## Starting record of test data
+newTestStartRec <- newTrainEndRec+1
+
+## Ending date of testdata set
+## if teststartdate + 7 exceeds the last day from the dataset, make the lastday from the total set as the testing data end date, if not testingdataEndDate = teststartdate + 7
+if((as.Date(newTestStartDate)+timeFrame) > LastDay ) {
+  newTestEndDate <- as.Date(newTestStartDate) + (timeFrame-1) #7
+  newTestEndRec <- tail(which(as.Date(datFinal1$datetime_c) == newTestEndDate) , 1)
+  finalRec <- TRUE 
+}
+else {
+newTestEndDate <- as.Date(newTestStartDate) + timeFrame #7
+newTestEndRec <- head(which(as.Date(datFinal1$datetime_c) == newTestEndDate) ,1) -1
+}
+
+## Create the testing Dataset from the TestingData Start record and testingDataEndRecord
+datTestNew <- datFinal1[newTestStartRec: newTestEndRec,] 
+
+## Build model to predict the Total count of the TestDataSet
+M5Model_count <- M5P(count ~ season+holiday+workingday+weather+temp+atemp+humidity+windspeed+aTempPrevX+TempPrevX+windspeedPrevX+hrs, data = datTrainNew)
+m5Pred_count <- predict(M5Model_count, datTestNew)
+
+## Build model to predict the Total Casual users count of testDataSet
+M5Model_casual <- M5P(casual ~ season+holiday+workingday+weather+temp+atemp+humidity+windspeed+aTempPrevX+TempPrevX+windspeedPrevX+hrs, data = datTrainNew)
+m5Pred_casual <- predict(M5Model_casual, datTestNew)
+
+## Build model to predict the Total registered users count of testDataSet
+M5Model_registered <- M5P(registered ~ season+holiday+workingday+weather+temp+atemp+humidity+windspeed+aTempPrevX+TempPrevX+windspeedPrevX+hrs, data = datTrainNew)
+m5Pred_registered <- predict(M5Model_registered, datTestNew)
+
+## Apply the values to the last 10 days of the month. i.e if the date is > 19th of the month
+if (as.numeric(strftime(newTestStartDate,'%d')) > 19) {
+datFinal1[newTestStartRec: newTestEndRec,]$count <- ifelse((round(m5Pred_count) > 0),round(m5Pred_count),0)
+
+datFinal1[newTestStartRec: newTestEndRec,]$casual <- ifelse((round(m5Pred_casual) > 0),round(m5Pred_casual),0)
+
+datFinal1[newTestStartRec: newTestEndRec,]$registered <- ifelse((round(m5Pred_registered) > 0),round(m5Pred_registered),0)
+
+}
+
+## Slide the window by 1 day
+trainStartDate <- newTrainStartDate+1
+i <- i+1
+newTestEndMonth <- strftime(newTestEndDate,'%m')
+newTestEndYr <- strftime(newTestEndDate,'%Y')
+
+if (mnth != strftime(newTestEndDate, '%m') ) {
+  trainStartDate <-  as.Date(newTestEndDate)
+  mnth <- strftime(newTestEndDate, '%m')
+}
+
+}
+
+datFinal1$count_RegSumCas <- (datFinal1$casual + datFinal1$registered)
+
+```
+
+
+```{r Write the entire predicted values into a file to be used for TimeSeries Analysis and Prediction }
+
+write.csv(datFinal1 ,file = "SlidingWindowData_EntireDataSet.csv")
+```
+
+
+### Time Series Analysis
+```{r Time Series Analysis  using TS Function}
+#rm(list=ls())
+FinalDatafile = "SlidingWindowData_EntireDataSet.csv"
+#FinalDatafile = "SlidingWindowFinal.csv"
+## Read the final with predicted values
+bike <- read.csv(FinalDatafile ,stringsAsFactors = FALSE)
+bike <- bike[, c("datetime", "casual", "registered","count","count_RegSumCas")]
+str(bike)
+library(forecast)
+
+
+######################## Day Time Series Analysis#############################
+str(bike)
+
+#Convert the char date time to actual date time in a separate column
+bike$datetime2<-strptime(bike$datetime, "%Y-%m-%d %H:%M",tz="GMT")
+
+#Capture Dates in a separate column
+bike$Date<-as.Date(bike$datetime2)
+
+str(bike)
+#####################################Analysis of Casual######################3333
+
+
+#Aggregate Casual on Date basis with mean operation
+tbike_casual<-aggregate(casual~Date, data = bike,FUN=mean)
+str(tbike_casual)
+head(tbike_casual)
+
+##Create a time series with frequency 365 for casual:-
+tcasual <- ts(tbike_casual$casual, start=c(2011, 1,1), frequency=365)
+
+#Plot the time series
+plot(tcasual)
+
+par(mfrow=c(2, 2))
+
+#Smoother plotted curve using ma() for k = 5,10,15,20:-
+plot(ma(tcasual, 5))
+plot(ma(tcasual,10))
+plot(ma(tcasual,15))
+plot(ma(tcasual,20))
+
+#Forecast for next two years from 2013 to 2015:-
+plot(forecast(tcasual),xlab="Forecast for next two years",ylab="Count")
+
+#Forecast for next 10 days from Jan 2013:-
+plot(forecast(tcasual,10),xlab="Forecast for next 10 days",ylab="Count")
+
+#Forecast for next 30 days from Jan 2013
+plot(forecast(tcasual,30),xlab="Forecast for next 30 days",ylab="Count")
+
+#Forecast for next 60 days from Jan 2013
+plot(forecast(tcasual,90),xlab="Forecast for next 1 quarter (since 2013 Jan)",ylab="Count")
+
+#
+par(mfrow=c(1, 1))
+
+#Seasonal plots for 2011 and 2012
+sp <- seasonplot(tcasual,year.labels = TRUE)
+
+#We see that the trend were almost same in the two years
+
+#Plot of seasonal decomposition using stl()
+
+sd<- stl(tcasual, s.window="period")
+plot(sd)
+accuracy(forecast(sd))
+
+#We see that the trend is similar to season plot
+
+#Accuracy of time series model
+accuracy(forecast(tcasual,30))
+
+
+#########################Analysis of Registered####################################3333
+
+
+#Aggregate registered on Date basis with mean operation
+tbike_registered<-aggregate(registered~Date, data = bike,FUN=mean)
+str(tbike_registered)
+head(tbike_registered)
+
+##Create a time series with frequency 365 for registered:-
+tregistered <- ts(tbike_registered$registered, start=c(2011, 1,1), frequency=365)
+
+
+#Plot the time series
+plot(tregistered)
+
+par(mfrow=c(2, 2))
+
+#Smoother plotted curve using ma() for k = 5,10,15,20:-
+plot(ma(tregistered, 5))
+plot(ma(tregistered,10))
+plot(ma(tregistered,15))
+plot(ma(tregistered,20))
+
+#Forecast for next two years from 2013 to 2015:-
+plot(forecast(tregistered),xlab="Forecast for next two years",ylab="Count")
+
+#Forecast for next 10 days from Jan 2013:-
+plot(forecast(tregistered,10),xlab="Forecast for next 10 days",ylab="Count")
+
+#Forecast for next 30 days from Jan 2013
+plot(forecast(tregistered,30),xlab="Forecast for next 30 days",ylab="Count")
+
+#Forecast for next 60 days from Jan 2013
+plot(forecast(tregistered,90),xlab="Forecast for next 1 quarter (since 2013 Jan)",ylab="Count")
+
+#
+
+par(mfrow=c(1, 1))
+
+
+#Seasonal plots for 2011 and 2012
+sp <- seasonplot(tregistered,year.labels = TRUE)
+
+#We see that the trend were almost same in the two years
+
+#Plot of seasonal decomposition using stl()
+
+sd<- stl(tregistered, s.window="period")
+plot(sd)
+accuracy(forecast(sd))
+
+#We see that the trend is similar to season plot
+
+#Accuracy of time series model
+accuracy(forecast(tregistered,30))
+
+
+##########################Analysis on Predicted Count################333
+
+
+#Aggregate count on Date basis with mean operation
+tbike_count<-aggregate(count~Date, data = bike,FUN=mean)
+str(tbike_count)
+head(tbike_count)
+
+##Create a time series with frequency 365 for count:-
+tcount <- ts(tbike_count$count, start=c(2011, 1,1), frequency=365)
+
+
+#Plot the time series
+plot(tcount)
+
+par(mfrow=c(2, 2))
+
+#Smoother plotted curve using ma() for k = 5,10,15,20:-
+plot(ma(tcount, 5))
+plot(ma(tcount,10))
+plot(ma(tcount,15))
+plot(ma(tcount,20))
+
+#Forecast for next two years from 2013 to 2015:-
+plot(forecast(tcount),xlab="Forecast for next two years",ylab="Count")
+
+#Forecast for next 10 days from Jan 2013:-
+plot(forecast(tcount,10),xlab="Forecast for next 10 days",ylab="Count")
+
+#Forecast for next 30 days from Jan 2013
+plot(forecast(tcount,30),xlab="Forecast for next 30 days",ylab="Count")
+
+#Forecast for next 60 days from Jan 2013
+plot(forecast(tcount,90),xlab="Forecast for next 1 quarter (since 2013 Jan)",ylab="Count")
+
+#
+
+par(mfrow=c(1, 1))
+
+#Seasonal plots for 2011 and 2012
+sp <- seasonplot(tcount,year.labels = TRUE)
+
+#We see that the trend were almost same in the two years
+
+#Plot of seasonal decomposition using stl()
+
+sd<- stl(tcount, s.window="period")
+plot(sd)
+accuracy(forecast(sd))
+
+#We see that the trend is similar to season plot
+
+#Accuracy of time series model
+accuracy(forecast(tcount,30))
+
+
+############################Analysis on Total count(which includes predicted casual+predicted registed)##
+
+
+#Aggregate count2 on Date basis with mean operation
+tbike_count2<-aggregate(count_RegSumCas~Date, data = bike,FUN=mean)
+str(tbike_count2)
+head(tbike_count2)
+
+##Create a time series with frequency 365 for count2:-
+tcount2 <- ts(tbike_count2$count_RegSumCas, start=c(2011, 1,1), frequency=365)
+
+
+#Plot the time series
+plot(tcount2)
+
+par(mfrow=c(2, 2))
+
+#Smoother plotted curve using ma() for k = 5,10,15,20:-
+plot(ma(tcount2, 5))
+plot(ma(tcount2,10))
+plot(ma(tcount2,15))
+plot(ma(tcount2,20))
+
+#Forecast for next two years from 2013 to 2015:-
+plot(forecast(tcount2),xlab="Forecast for next two years",ylab="count")
+
+#Forecast for next 10 days from Jan 2013:-
+plot(forecast(tcount2,10),xlab="Forecast for next 10 days",ylab="count")
+
+#Forecast for next 30 days from Jan 2013
+plot(forecast(tcount2,30),xlab="Forecast for next 30 days",ylab="count")
+
+#Forecast for next 60 days from Jan 2013
+plot(forecast(tcount2,90),xlab="Forecast for next 1 quarter (since 2013 Jan)",ylab="count")
+
+#
+
+par(mfrow=c(1, 1))
+
+
+#Seasonal plots for 2011 and 2012
+sp <- seasonplot(tcount2,year.labels = TRUE)
+
+#We see that the trend were almost same in the two years
+
+#Plot of seasonal decomposition using stl()
+sd<- stl(tcount2, s.window="period")
+plot(sd)
+accuracy(forecast(sd))
+
+#We see that the trend is similar to season plot
+
+#Accuracy of time series model
+accuracy(forecast(tcount2,30))
+
+```
+
+
+### Clustering Analysis
+```{r Clustering Analysis on Train data- First 20 days of the month}
+
+## Data Preparation as in Cluster 1, 
+## Convert datetime from char to datetime
+datBike$datetime_c <- strptime(datBike$datetime, format='%Y-%m-%d %H:%M:%S')
+
+# Extract hrs from the datetime
+datBike$hrs <- strftime(datBike$datetime_c, '%H')
+
+# Convert season, holiday, workingday, weather to factors
+datBike$season <- factor(datBike$season)
+datBike$holiday <- factor(datBike$holiday)
+datBike$workingday <- factor(datBike$workingday)
+datBike$weather <- factor(datBike$weather)
+str(datBike)
+summary(datBike)
+
+### Convert hours into time intervals, 
+## time 01 means the demand from 00 to 01 hrs, so based on that we get the following time_intervals
+# T1: 1am to 5am
+# T2: 5am to 9am
+# T3: 9am to 1pm
+# T4: 1pm to 5pm
+# T5: 5pm to 9pm
+# T6: 9pm to 12am and 12am to 1am
+datBike$time_intervals <- datBike$hrs 
+datBike$time_intervals <- sapply(datBike$time_intervals, function(x) {
+   if (x < 02) {return ('time_6')}
+   else if (x >=02 & x <=05 ) { return ('time_1') }
+   else if(x >=06 & x <=09 ) {return ('time_2')}
+   else if(x >=10 & x <=13 ){ return ('time_3')}
+   else if(x >=14 & x <=17 ) {return ('time_4')}
+   else if(x >=18 & x <=21 ) { return ('time_5')}
+   else if(x >=22) {return ('time_6')}
+   }  )
+
+## Show the distribution of the data in time intervals
+table(datBike$time_intervals)
+
+# Convert time_intervals to factors
+datBike$time_intervals <- factor(datBike$time_intervals)
+
+# Show the summary of the train data
+summary(datBike)
+```
+
+
+```{r Clustering with Simple Means using 8 clusters}
+
+### Clustering with Simple Means , 8-clusters
+simpleKmeansCLuster8 <- SimpleKMeans(datBike[c("temp","atemp","humidity","windspeed","workingday","holiday","season","weather","time_intervals","casual","registered","count")] ,Weka_control(N=8, V=TRUE))
+
+simpleKmeansCLuster8
+summary(simpleKmeansCLuster8)
+str(simpleKmeansCLuster8)
+
+```
+
+
+```{r Clustering with Simple Means using 10 clusters}
+
+### Clustering with Simple Means , 10-clusters
+simpleKmeansCLuster10 <- SimpleKMeans(datBike[c("temp","atemp","humidity","windspeed","workingday","holiday","season","weather","time_intervals","casual","registered","count")] ,Weka_control(N=10, V=TRUE))
+
+simpleKmeansCLuster10
+summary(simpleKmeansCLuster10)
+str(simpleKmeansCLuster10)
+
+```
+
+
+```{r Clustering with Simple Means using 12 clusters}
+
+### Clustering with Simple Means , 12-clusters
+simpleKmeansCLuster12 <- SimpleKMeans(datBike[c("temp","atemp","humidity","windspeed","workingday","holiday","season","weather","time_intervals","casual","registered","count")] ,Weka_control(N=12, V=TRUE))
+
+simpleKmeansCLuster12
+summary(simpleKmeansCLuster12)
+str(simpleKmeansCLuster12)
+
+```
+
+
+## Upon validation we have decided to use 10-clusters to perform unsupervised segmentation
+```{r }
+
+## Append the class_ids to each record 
+datBike_w_clusterIds <- cbind(simpleKmeansCLuster10$class_ids,datBike)
+
+# Show the summary of the dataset with cluster ids
+summary(datBike_w_clusterIds)
+str(datBike_w_clusterIds)
+
+```
+
+## Identify the clusters 
+a) Cluster having high casual user Demand
+b) Cluster having high registered user Demand
+c) Cluster having low overall user Demand
+```{r}
+## Creating a dataframe  with High Casual demand
+Cluster_high_casual <- subset(datBike_w_clusterIds, datBike_w_clusterIds$`simpleKmeansCLuster10$class_ids`==3)
+
+## Creating a dataframe with High Registered user demand
+Cluster_high_registered <- subset(datBike_w_clusterIds, datBike_w_clusterIds$`simpleKmeansCLuster10$class_ids`==9)
+
+## Creating a dataframe with Low Overall demand
+Cluster_low_overall <- subset(datBike_w_clusterIds, datBike_w_clusterIds$`simpleKmeansCLuster10$class_ids`==7)
+```
+
+
+## Building Regression Tree over the clusters
+```{r}
+## High Casual Demand Cluster
+
+RpartModel_high_casual <- rpart(casual ~ holiday+workingday+temp +humidity+windspeed+atemp+humidity+time_intervals+season+weather, data = Cluster_high_casual, control=Weka_control(C=0.05))
+RpartModel_high_casual
+# Show the summary of the model built
+summary(RpartModel_high_casual)
+# Plot the model
+rpart.plot(RpartModel_high_casual)
+
+
+## High Registerd Demand Cluster
+RpartModel_high_registered <- rpart(registered ~ holiday+workingday+temp +humidity+windspeed+atemp+humidity+time_intervals+season+weather, data = Cluster_high_registered, control=Weka_control(C=0.05))
+RpartModel_high_registered
+# Show the summary of the model built
+summary(RpartModel_high_registered)
+# Plot the model
+rpart.plot(RpartModel_high_registered)
+
+## Low Overall Demand Cluster
+RpartModel_overall_low <- rpart(count ~ holiday+workingday+temp +humidity+windspeed+atemp+humidity+time_intervals+season+weather, data = Cluster_low_overall, control=Weka_control(C=0.05))
+RpartModel_high_registered
+# Show the summary of the model built
+summary(RpartModel_overall_low)
+
+# Plot the model
+rpart.plot(RpartModel_overall_low)
+
+```
+
